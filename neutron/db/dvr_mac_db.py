@@ -95,6 +95,19 @@ class DVRDbMixin(ext_dvr.DVRMacAddressPluginBase):
         LOG.error(_("MAC generation error after %s attempts"), max_retries)
         raise ext_dvr.MacAddressGenerationFailure(host=host)
 
+    def get_dvr_mac_bindings(self, context, filters=None, fields=None,
+                            sorts=None, limit=None, marker=None,
+                            page_reverse=False):
+        result_list = get_dvr_mac_address_list(context)
+        return {"dvr_mac_bindings" : result_list }
+
+    def create_dvr_mac_binding(self, context, dvr_mac_binding):
+        result_dict = _create_dvr_mac_address(context, dvr_mac_binding["host"])
+        return { "dvr_mac_binding" : result_dict }
+
+    def delete_dvr_mac_binding(self, context, mac_address):
+        return delete_dvr_mac_address(context, mac_address)
+
     def delete_dvr_mac_address(self, context, host):
         query = context.session.query(DistributedVirtualRouterMacAddress)
         (query.

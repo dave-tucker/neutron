@@ -16,9 +16,27 @@ import abc
 
 import six
 
-from neutron.api.v2 import attributes
+from neutron.api import extensions
+from neutron.api.v2 import attributes as attr
+from neutron.api.v2 import base
 from neutron.common import constants
 from neutron.common import exceptions
+from neutron import manager
+
+RESOURCE_NAME = 'dvr_mac_binding'
+RESOURCE_ATTRIBUTE_MAP = {
+    RESOURCE_NAME + 's' : {
+        'mac_address': {'allow_post': False, 'allow_put': False,
+                        'validate': {'type:mac_address': None},
+                        'is_visible': True,
+                        'primary_key': True
+                       },
+        'name': {'allow_post': True, 'allow_put': False,
+                 'is_visible': True, 'default': '',
+                 'validate': {'type:hostname': None}
+                }
+    }
+}
 
 DISTRIBUTED = 'distributed'
 EXTENDED_ATTRIBUTES_2_0 = {
@@ -26,12 +44,11 @@ EXTENDED_ATTRIBUTES_2_0 = {
         DISTRIBUTED: {'allow_post': True,
                       'allow_put': True,
                       'is_visible': True,
-                      'default': attributes.ATTR_NOT_SPECIFIED,
-                      'convert_to': attributes.convert_to_boolean_if_not_none,
+                      'default': attr.ATTR_NOT_SPECIFIED,
+                      'convert_to': attr.convert_to_boolean_if_not_none,
                       'enforce_policy': True},
     }
 }
-
 
 class DVRMacAddressNotFound(exceptions.NotFound):
     message = _("Distributed Virtual Router Mac Address for "
@@ -72,7 +89,19 @@ class Dvr(object):
     @classmethod
     def get_resources(cls):
         """Returns Ext Resources."""
-        return []
+        my_plurals = [(key, key[:-2]) for key in RESOURCE_ATTRIBUTE_MAP.keys()]
+        attr.PLURALS.update(dict(my_plurals))
+        plugin = manager.NeutronManager.get_plugin()
+        params = RESOURCE_ATTRIBUTE_MAP.get(RESOURCE_NAME + 's')
+        controller = base.create_resource(RESOURCE_NAME + 's',
+                                          RESOURCE_NAME,
+                                          plugin, params
+                                          )
+
+        ex = extensions.ResourceExtension(RESOURCE_NAME + 's',
+                                          controller)
+
+        return [ex]
 
     def get_extended_resources(self, version):
         if version == "2.0":
@@ -83,6 +112,29 @@ class Dvr(object):
 
 @six.add_metaclass(abc.ABCMeta)
 class DVRMacAddressPluginBase(object):
+
+    @abc.abstractmethod
+    def get_dvr_mac_bindings(self, context, filters=None, fields=None,
+                            sorts=None, limit=None, marker=None,
+                            page_reverse=False):
+        """ Get DVR MAC Address Bindings
+
+        Return a list of host to mac address bindings
+        """
+        pass
+
+    @abc.abstractmethod
+    def create_dvr_mac_binding(self, context, dvr_mac_binding):
+        """ Create DVR Mac Address Binding
+
+        Given a hostname, create a new DVR Mac address binding
+        """
+        pass
+
+    @abc.abstractmethod
+    def delete_dvr_mac_binding(self, context, mac_address):
+        """ Delete a DVR Mac Address Binding """
+        pass
 
     @abc.abstractmethod
     def delete_dvr_mac_address(self, context, host):
