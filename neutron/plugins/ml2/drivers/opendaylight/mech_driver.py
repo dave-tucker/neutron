@@ -15,8 +15,6 @@
 # @author: Kyle Mestery, Cisco Systems, Inc.
 # @author: Dave Tucker, Hewlett-Packard Development Company L.P.
 
-import time
-
 from oslo.config import cfg
 import requests
 
@@ -25,10 +23,11 @@ from neutron.common import exceptions as n_exc
 from neutron.common import utils
 from neutron.extensions import portbindings
 from neutron.openstack.common import excutils
-from neutron.openstack.common import jsonutils
 from neutron.openstack.common import log
 from neutron.plugins.common import constants
 from neutron.plugins.ml2 import driver_api as api
+from neutron.plugins.ml2.drivers.opendaylight import client as odl_client
+from neutron.plugins.ml2.drivers.opendaylight import config  # noqa
 
 LOG = log.getLogger(__name__)
 
@@ -43,21 +42,6 @@ not_found_exception_map = {ODL_NETWORKS: n_exc.NetworkNotFound,
                            ODL_SUBNETS: n_exc.SubnetNotFound,
                            ODL_PORTS: n_exc.PortNotFound}
 
-odl_opts = [
-    cfg.StrOpt('url',
-               help=_("HTTP URL of OpenDaylight REST interface.")),
-    cfg.StrOpt('username',
-               help=_("HTTP username for authentication")),
-    cfg.StrOpt('password', secret=True,
-               help=_("HTTP password for authentication")),
-    cfg.IntOpt('timeout', default=10,
-               help=_("HTTP timeout in seconds.")),
-    cfg.IntOpt('session_timeout', default=30,
-               help=_("Tomcat session timeout in minutes.")),
-]
-
-cfg.CONF.register_opts(odl_opts, "ml2_odl")
-
 
 def try_del(d, keys):
     """Ignore key errors when deleting from a dictionary."""
@@ -66,63 +50,6 @@ def try_del(d, keys):
             del d[key]
         except KeyError:
             pass
-
-
-class OpendaylightAuthError(n_exc.NeutronException):
-    message = '%(msg)s'
-
-
-class JsessionId(requests.auth.AuthBase):
-
-    """Attaches the JSESSIONID and JSESSIONIDSSO cookies to an HTTP Request.
-
-    If the cookies are not available or when the session expires, a new
-    set of cookies are obtained.
-    """
-
-    def __init__(self, url, username, password):
-        """Initialization function for JsessionId."""
-
-        # NOTE(kmestery) The 'limit' paramater is intended to limit how much
-        # data is returned from ODL. This is not implemented in the Hydrogen
-        # release of OpenDaylight, but will be implemented in the Helium
-        # timeframe. Hydrogen will silently ignore this value.
-        self.url = str(url) + '/' + ODL_NETWORKS + '?limit=1'
-        self.username = username
-        self.password = password
-        self.auth_cookies = None
-        self.last_request = None
-        self.expired = None
-        self.session_timeout = cfg.CONF.ml2_odl.session_timeout * 60
-        self.session_deadline = 0
-
-    def obtain_auth_cookies(self):
-        """Make a REST call to obtain cookies for ODL authenticiation."""
-
-        try:
-            r = requests.get(self.url, auth=(self.username, self.password))
-            r.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            raise OpendaylightAuthError(msg=_("Failed to authenticate with "
-                                              "OpenDaylight: %s") % e)
-        except requests.exceptions.Timeout as e:
-            raise OpendaylightAuthError(msg=_("Authentication Timed"
-                                              " Out: %s") % e)
-
-        jsessionid = r.cookies.get('JSESSIONID')
-        jsessionidsso = r.cookies.get('JSESSIONIDSSO')
-        if jsessionid and jsessionidsso:
-            self.auth_cookies = dict(JSESSIONID=jsessionid,
-                                     JSESSIONIDSSO=jsessionidsso)
-
-    def __call__(self, r):
-        """Verify timestamp for Tomcat session timeout."""
-
-        if time.time() > self.session_deadline:
-            self.obtain_auth_cookies()
-        self.session_deadline = time.time() + self.session_timeout
-        r.prepare_cookies(self.auth_cookies)
-        return r
 
 
 class OpenDaylightMechanismDriver(api.MechanismDriver):
@@ -137,15 +64,12 @@ class OpenDaylightMechanismDriver(api.MechanismDriver):
     out_of_sync = True
 
     def initialize(self):
-        self.url = cfg.CONF.ml2_odl.url
-        self.timeout = cfg.CONF.ml2_odl.timeout
-        self.username = cfg.CONF.ml2_odl.username
-        self.password = cfg.CONF.ml2_odl.password
-        required_opts = ('url', 'username', 'password')
-        for opt in required_opts:
-            if not getattr(self, opt):
-                raise cfg.RequiredOptError(opt, 'ml2_odl')
-        self.auth = JsessionId(self.url, self.username, self.password)
+        self.client = odl_client.OpenDaylightRestClient(
+            cfg.CONF.ml2_odl.url,
+            cfg.CONF.ml2_odl.username,
+            cfg.CONF.ml2_odl.password,
+            cfg.CONF.ml2_odl.timeout
+        )
         self.vif_type = portbindings.VIF_TYPE_OVS
         self.vif_details = {portbindings.CAP_PORT_FILTER: True}
 
@@ -213,7 +137,7 @@ class OpenDaylightMechanismDriver(api.MechanismDriver):
         for resource in resources:
             try:
                 urlpath = collection_name + '/' + resource['id']
-                self.sendjson('get', urlpath, None)
+                self.client.sendjson('get', urlpath, None)
             except requests.exceptions.HTTPError as e:
                 with excutils.save_and_reraise_exception() as ctx:
                     if e.response.status_code == 404:
@@ -224,7 +148,8 @@ class OpenDaylightMechanismDriver(api.MechanismDriver):
         key = resource_name if len(to_be_synced) == 1 else collection_name
 
         # 400 errors are returned if an object exists, which we ignore.
-        self.sendjson('post', collection_name, {key: to_be_synced}, [400])
+        self.client.sendjson('post', collection_name,
+                             {key: to_be_synced}, [400])
 
     @utils.synchronized('odl-sync-full')
     def sync_full(self, context):
@@ -304,8 +229,8 @@ class OpenDaylightMechanismDriver(api.MechanismDriver):
                 attr_filter_update(self, resource, context, dbcontext)
             try:
                 # 400 errors are returned if an object exists, which we ignore.
-                self.sendjson(method, urlpath, {object_type[:-1]: resource},
-                              [400])
+                self.client.sendjson(method, urlpath,
+                                     {object_type[:-1]: resource}, [400])
             except Exception:
                 with excutils.save_and_reraise_exception():
                     self.out_of_sync = True
@@ -323,23 +248,6 @@ class OpenDaylightMechanismDriver(api.MechanismDriver):
         groups = [context._plugin.get_security_group(dbcontext, sg)
                   for sg in port['security_groups']]
         port['security_groups'] = groups
-
-    def sendjson(self, method, urlpath, obj, ignorecodes=[]):
-        """Send json to the OpenDaylight controller."""
-
-        headers = {'Content-Type': 'application/json'}
-        data = jsonutils.dumps(obj, indent=2) if obj else None
-        url = '/'.join([self.url, urlpath])
-        LOG.debug(_('ODL-----> sending URL (%s) <-----ODL') % url)
-        LOG.debug(_('ODL-----> sending JSON (%s) <-----ODL') % obj)
-        r = requests.request(method, url=url,
-                             headers=headers, data=data,
-                             auth=self.auth, timeout=self.timeout)
-
-        # ignorecodes contains a list of HTTP error codes to ignore.
-        if r.status_code in ignorecodes:
-            return
-        r.raise_for_status()
 
     def bind_port(self, context):
         LOG.debug(_("Attempting to bind port %(port)s on "

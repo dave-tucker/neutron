@@ -17,7 +17,7 @@
 from neutron.plugins.common import constants
 from neutron.plugins.ml2 import config as config
 from neutron.plugins.ml2 import driver_api as api
-from neutron.plugins.ml2.drivers import mechanism_odl
+from neutron.plugins.ml2.drivers.opendaylight import mech_driver as mech_odl
 from neutron.plugins.ml2 import plugin
 from neutron.tests import base
 from neutron.tests.unit import test_db_plugin as test_plugin
@@ -43,8 +43,8 @@ class OpenDaylightTestCase(test_plugin.NeutronDbPluginV2TestCase):
         super(OpenDaylightTestCase, self).setUp(PLUGIN_NAME)
         self.port_create_status = 'DOWN'
         self.segment = {'api.NETWORK_TYPE': ""}
-        self.mech = mechanism_odl.OpenDaylightMechanismDriver()
-        mechanism_odl.OpenDaylightMechanismDriver.sendjson = (
+        self.mech = mech_odl.OpenDaylightMechanismDriver()
+        mech_odl.OpenDaylightMechanismDriver.client.sendjson = (
             self.check_sendjson)
 
     def check_sendjson(self, method, urlpath, obj, ignorecodes=[]):
